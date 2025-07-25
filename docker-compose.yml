@@ -1,0 +1,49 @@
+services:
+  dell-fan-control:
+    image: ghcr.io/yourusername/yourrepo:latest
+    container_name: dell-fan-control
+    restart: unless-stopped
+    
+    # Network mode host is required for IPMI access
+    network_mode: host
+    
+    environment:
+      # Required iDRAC credentials
+      IDRAC_HOST: "192.168.1.100"        # Change to your iDRAC IP
+      IDRAC_USER: "root"                 # Change to your iDRAC username
+      IDRAC_PASS: "calvin"               # Change to your iDRAC password
+      
+      # Optional configuration
+      LOG_LEVEL: "info"                  # debug, info, warn, error
+      CHECK_INTERVAL: "30"               # seconds between temperature checks
+      TEMP_SENSOR: "04h"                 # 04h=Inlet, 0Eh=CPU1, 0Fh=CPU2
+      MAX_TEMP_THRESHOLD: "40"           # Temperature for emergency dynamic control
+      HYSTERESIS: "2"                    # Degrees change needed for speed reduction
+      TZ: "America/New_York"             # Set your timezone
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "dell-fan-control.sh"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    
+    # Resource limits (optional)
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: '0.1'
+        reservations:
+          memory: 32M
+          cpus: '0.05'
+
+# Optional: monitoring with logs
+  # Uncomment if you want to use a log aggregator
+  # watchtower:
+  #   image: containrrr/watchtower
+  #   container_name: watchtower
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock
+  #   command: --interval 3600 dell-fan-control
