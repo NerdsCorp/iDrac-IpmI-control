@@ -1,6 +1,6 @@
 services:
   dell-fan-control:
-    image: ghcr.io/yourusername/yourrepo:latest
+    image: ghcr.io/nerdscorp/idrac-ipmi-control:latest
     container_name: dell-fan-control
     restart: unless-stopped
     
