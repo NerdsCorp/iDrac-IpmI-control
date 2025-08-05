@@ -21,8 +21,8 @@ IDRAC_PASS=${IDRAC_PASS:-""}
 LOG_LEVEL=${LOG_LEVEL:-"info"}
 CHECK_INTERVAL=${CHECK_INTERVAL:-30}
 TEMP_SENSOR=${TEMP_SENSOR:-"04h"}  # Inlet Temp
-MAX_TEMP_THRESHOLD=${MAX_TEMP_THRESHOLD:-40}
-HYSTERESIS=${HYSTERESIS:-2}
+MAX_TEMP_THRESHOLD=${MAX_TEMP_THRESHOLD:-45}
+HYSTERESIS=${HYSTERESIS:-3}
 
 # Fan speed mappings (hex values for ipmitool)
 declare -A FAN_SPEEDS=(
@@ -47,22 +47,15 @@ declare -A FAN_SPEEDS=(
     [100]="0x64" # 100%
 )
 
-# Temperature thresholds and corresponding fan speeds
+# Temperature thresholds and corresponding fan speeds (optimized for minimum noise)
 declare -A TEMP_FAN_MAP=(
-    [0]=0      # 0-12°C -> 5% (very cool)
-    [13]=0   # 13-15°C -> 10%
-    [16]=5    # 16-18°C -> 15%
-    [19]=10    # 19-20°C -> 18%
-    [21]=15    # 21-22°C -> 20%
-    [23]=18    # 23-24°C -> 22%
-    [25]=20    # 25-26°C -> 25%
-    [27]=22    # 27-28°C -> 28%
-    [29]=25    # 29-30°C -> 30%
-    [31]=28    # 31-32°C -> 35%
-    [33]=35    # 33-34°C -> 40%
-    [35]=45    # 35-36°C -> 45%
-    [37]=50    # 37-38°C -> 50%
-    [39]=60    # 39°C -> 60%
+    [0]=5      # 0-29°C -> 5% (minimal speed for most temps)
+    [30]=10    # 30-34°C -> 10% (slightly warmer)
+    [35]=15    # 35-37°C -> 15% (getting warm)
+    [38]=20    # 38-39°C -> 20% (warm)
+    [40]=30    # 40-42°C -> 30% (hot)
+    [43]=50    # 43-45°C -> 50% (very hot)
+    [46]=70    # 46°C+ -> 70% (emergency cooling)
 )
 
 # Global variables
@@ -192,26 +185,49 @@ set_fan_speed() {
 # Determine optimal fan speed based on temperature
 calculate_fan_speed() {
     local temp=$1
-    local target_speed=5   # Default minimum speed (5%)
+    local base_target_speed=5   # Default minimum speed (5%)
     
     # Find the appropriate fan speed based on temperature ranges
     for temp_threshold in $(printf '%s\n' "${!TEMP_FAN_MAP[@]}" | sort -n); do
         if [[ $temp -ge $temp_threshold ]]; then
-            target_speed=${TEMP_FAN_MAP[$temp_threshold]}
+            base_target_speed=${TEMP_FAN_MAP[$temp_threshold]}
         fi
     done
     
-    # Apply hysteresis to prevent oscillation
-    if [[ -n "$CURRENT_FAN_SPEED" && $temp -lt $((LAST_TEMP - HYSTERESIS)) ]]; then
-        # Temperature dropped significantly, allow speed reduction
-        log debug "Temperature dropped by more than ${HYSTERESIS}°C, allowing speed reduction"
-    elif [[ -n "$CURRENT_FAN_SPEED" && $temp -le $((LAST_TEMP + HYSTERESIS)) && $target_speed -lt $CURRENT_FAN_SPEED ]]; then
-        # Temperature is stable/slightly higher but target speed is lower, keep current speed
-        target_speed=$CURRENT_FAN_SPEED
-        log debug "Applying hysteresis: keeping current speed $CURRENT_FAN_SPEED%"
+    # Apply hysteresis logic to prevent oscillation
+    local final_speed=$base_target_speed
+    
+    # Only apply hysteresis if we have a previous temperature and fan speed
+    if [[ -n "$CURRENT_FAN_SPEED" && $LAST_TEMP -gt 0 ]]; then
+        local temp_diff=$((temp - LAST_TEMP))
+        
+        # If temperature is rising or staying same, use base target speed
+        if [[ $temp_diff -ge 0 ]]; then
+            final_speed=$base_target_speed
+            log debug "Temperature stable/rising (${temp_diff}°C): using base target speed ${base_target_speed}%"
+        # If temperature is dropping, only reduce fan speed if drop is significant
+        elif [[ $temp_diff -lt -$HYSTERESIS ]]; then
+            final_speed=$base_target_speed
+            log debug "Temperature dropped significantly (${temp_diff}°C): allowing speed reduction to ${base_target_speed}%"
+        else
+            # Temperature dropped but not significantly, keep current speed only if much higher
+            if [[ $CURRENT_FAN_SPEED -gt $((base_target_speed + 10)) ]]; then
+                # If current speed is significantly higher, allow some reduction
+                final_speed=$((base_target_speed + 5))
+                log debug "Temperature dropped slightly (${temp_diff}°C): partial speed reduction to ${final_speed}%"
+            elif [[ $CURRENT_FAN_SPEED -gt $base_target_speed ]]; then
+                final_speed=$CURRENT_FAN_SPEED
+                log debug "Temperature dropped slightly (${temp_diff}°C): maintaining current speed ${CURRENT_FAN_SPEED}%"
+            else
+                final_speed=$base_target_speed
+                log debug "Temperature dropped slightly (${temp_diff}°C): using base target speed ${base_target_speed}%"
+            fi
+        fi
+    else
+        log debug "First run or no previous data: using base target speed ${base_target_speed}%"
     fi
     
-    echo "$target_speed"
+    echo "$final_speed"
 }
 
 # Get fan RPM readings for monitoring
@@ -240,7 +256,7 @@ monitor_and_control() {
             continue
         fi
         
-        log info "Current temperature: ${current_temp}°C"
+        log info "Current temperature: ${current_temp}°C (previous: ${LAST_TEMP}°C)"
         
         # Emergency check: if temperature is too high, enable dynamic control
         if [[ $current_temp -gt $MAX_TEMP_THRESHOLD ]]; then
